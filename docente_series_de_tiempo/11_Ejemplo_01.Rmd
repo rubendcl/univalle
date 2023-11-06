@@ -1,5 +1,5 @@
 ---
-title: "Exposure-response modeling for binary data"
+title: "Series de Tiempo Ejemplo 01"
 output:
   slidy_presentation:
     theme: cerulean
@@ -7,8 +7,7 @@ output:
     fig_height: 5
     font_adjustment: 3
     transition: faster
-    css: slidystyles.css
-    footer: tunka &copy 2023
+    footer: rubendcl &copy 2023
     mathjax: local
     self_contained: false
     df_print: tibble
@@ -23,46 +22,18 @@ editor_options:
 
 ```{r,echo=FALSE,message=FALSE}
 knitr::opts_chunk$set(comment='.',fig.align=TRUE,message=FALSE,warning=FALSE)
-library(tidyverse)
-library(stringr)
-library(haven)
-library(survival)
-library(GGally)
-library(mgcv)
-library(binom)
-library(texreg)
-library(DHARMa)
-library(brms)
-library(ggplot2)
-#library(pmtables)
+#Se carga las librerias necesarias
+library(forecast)
+library(tseries)
+
 
 theme_set(theme_bw())
 ``` 
 
-* Encountering binary data
-* Groundwork
-   * Notational conventions
-   * Modeling from a probabilistic viewpoint
-   
-* Bernoulli distribution
-   * Defining models
-   * Maximum likelihood
-
-* Visualizing relationships
-* Models, model checking, and measures of effect
+* Series de tiempo
   
 
-# Binary Data Example
-
-* This data set is comprised of a two-week study (protocol A) and a six-week study (protocol B)
-
-* The data set includes patients of type `PT2`, a patient type that (let's say) has not been studied at higher dose levels.
-
-* Suppose further that a dose level under consideration for a phase 2 study in `PT2` would have typical value exposures near 2.5 ug/mL.
-
-* The objective of *this* analysis will be to determine whether the Adverse Event (AE) rate will be "sufficiently low" in `PT2` at that exposure.
-
-# Data snapshot A
+# Ejemplo
 
 Pharmacology data:
 
@@ -74,11 +45,15 @@ Pharmacology data:
 
 ```{r, echo=FALSE}
 #source of data:
-setwd("C:/Users/ruben/Documents/2023/Academics/Time-to-Event-Analysis_Course-01")
+setwd("C:/Users/ruben/Documents/2023/Univalle/Aplicaciones/univalle/docente_series_de_tiempo")
 ```
 
 ```{r}
-load('data/aedat.RDS')
+#Cargamos los datos co2
+co2<-read.csv("co2.csv", header = TRUE, sep = ";")
+#Transformamos los datos en una serie temporal 
+co2ts<-ts(co2$CO2, start = c(1959,1), frequency = 12)
+print(co2ts)
 ```
 
 Variables and possible values:
