@@ -1,0 +1,390 @@
+---
+title: "Exposure-response modeling for binary data"
+output:
+  slidy_presentation:
+    theme: cerulean
+    fig_width: 9
+    fig_height: 5
+    font_adjustment: 3
+    transition: faster
+    css: slidystyles.css
+    footer: tunka &copy 2023
+    mathjax: local
+    self_contained: false
+    df_print: tibble
+#bibliography: alpha.bib
+#nocite: | 
+editor_options: 
+  chunk_output_type: console
+---
+
+
+# Outline
+
+```{r,echo=FALSE,message=FALSE}
+knitr::opts_chunk$set(comment='.',fig.align=TRUE,message=FALSE,warning=FALSE)
+library(tidyverse)
+library(stringr)
+library(haven)
+library(survival)
+library(GGally)
+library(mgcv)
+library(binom)
+library(texreg)
+library(DHARMa)
+library(brms)
+library(ggplot2)
+#library(pmtables)
+
+theme_set(theme_bw())
+``` 
+
+* Encountering binary data
+* Groundwork
+   * Notational conventions
+   * Modeling from a probabilistic viewpoint
+   
+* Bernoulli distribution
+   * Defining models
+   * Maximum likelihood
+
+* Visualizing relationships
+* Models, model checking, and measures of effect
+  
+
+# Binary Data Example
+
+* This data set is comprised of a two-week study (protocol A) and a six-week study (protocol B)
+
+* The data set includes patients of type `PT2`, a patient type that (let's say) has not been studied at higher dose levels.
+
+* Suppose further that a dose level under consideration for a phase 2 study in `PT2` would have typical value exposures near 2.5 ug/mL.
+
+* The objective of *this* analysis will be to determine whether the Adverse Event (AE) rate will be "sufficiently low" in `PT2` at that exposure.
+
+# Data snapshot A
+
+Pharmacology data:
+
+* 210 observations with 11 variables
+* 180 people
+
+<!--- PopPK is the study of variability in drug concentrations within a patient population receiving clinically relevant doses of a drug of interest. --->
+
+
+```{r, echo=FALSE}
+#source of data:
+setwd("C:/Users/ruben/Documents/2023/Academics/Time-to-Event-Analysis_Course-01")
+```
+
+```{r}
+load('data/aedat.RDS')
+```
+
+Variables and possible values:
+
+- STUDYID: Study [PROTA and PROTB]
+- STUDYDUR: Duration of Observation (weeks) [2 and 6]
+  - PROTA = 2 weeks (69 cases)
+  - PROTB = 6 weeks (141 cases)
+- USUBJID: Subject ID [UID-001, UID-002,...]
+- SEXTXT: Sex [FEMALE and MALE]
+- PTTYPE: Patient Type [HV, PT1 and PT2] -the reference level is "HV"
+- PBO: Placebo/Treatment [PBO and TRT]
+- CAVGSS: Time-averaged steady-state concentration (ug/mL) [0, 1.98, ...]
+- BWT: Baseline Body Weight (kg) [77.4, 83, ...]
+
+- AETOXGR: Adverse Event Grade [0,1,2 and 3]
+- AE01: Whether Severe Adverse Event Occured [0 and 1]
+  - AE01 = 1 <=> AETOXG = 3
+- TTE: Time of Adverse Event or Censoring Event (weeks) [0.0008,...]
+
+
+```{r}
+str(aedat)
+```
+
+# Data snapshot B
+
+First 10 rows (without showing SEXTXT):
+
+```{r}
+aedat[,-2] %>% head(10)
+```
+
+# Data snapshot C
+
+Some tables and plots:
+
+```{r}
+table(aedat[,c('STUDYID','STUDYDUR')])
+table(aedat[,c('STUDYID','PTTYPE')])
+table(aedat[,c('STUDYID','PBO')])
+table(aedat[,c('PBO','PTTYPE')])
+```
+
+```{r}
+table(aedat[,c('AETOXGR','AE01')])
+table(aedat[,c('STUDYID','AE01')])
+table(aedat[,c('PTTYPE','AE01')])
+```
+
+```{r}
+data <- aedat
+data$AE01 <- factor(data$AE01)
+ggplot(data, aes(x = AE01, y = CAVGSS)) +
+     geom_boxplot() +
+     labs(title = "Boxplot by AE01",
+          x = "AE01",
+          y = "CAVGSS")
+
+data <- aedat
+ggplot(data, aes(x = PTTYPE, y = CAVGSS)) +
+     geom_boxplot() +
+     labs(title = "Boxplot by PTTYPE",
+          x = "PTTYPE",
+          y = "CAVGSS")
+
+data <- aedat
+ggplot(data, aes(x = PBO, y = CAVGSS)) +
+     geom_boxplot() +
+     labs(title = "Boxplot by PBO",
+          x = "PBO",
+          y = "CAVGSS")
+
+data <- aedat
+ggplot(data, aes(x = STUDYID, y = CAVGSS)) +
+     geom_boxplot() +
+     labs(title = "Boxplot by PBO",
+          x = "STUDYID",
+          y = "CAVGSS")
+
+```
+
+# Transforming the data
+
+* Let's factorize the variable AETOXGR: None, Mild, Moderate and Severe
+ 
+* Let's create the variable TTE_SEVERE to show the time when AETOXGR = Severe
+
+```{r, echo=FALSE}
+aedat <- aedat %>% 
+  mutate(AETOXGR = factor(AETOXGR, 0:3, labels=c("None","Mild","Moderate","Severe"))) %>% 
+  group_by(USUBJID) %>%
+  # End of study for patients without a severe event
+  mutate(TTE_SEVERE = case_when(
+    STUDYID=="PROTA" ~ 2,
+    STUDYID=="PROTB" ~ 6),
+    # Time of severe event for those that had one
+    TTE_SEVERE = ifelse(AETOXGR=="Severe", TTE, TTE_SEVERE)
+  ) %>% 
+  ungroup()
+aedat[,c(-2,-4)] %>% head(10)
+```
+
+* Let's reduce the data to have only one observation per ID. We will use the min value of TTE_SEVERE variable for every ID that has more than one observation
+
+```{r, echo=FALSE}
+aedat <- aedat %>% 
+  group_by(USUBJID) %>% 
+  arrange(USUBJID, TTE_SEVERE) %>% slice(1) %>%
+  ungroup()
+aedat[,c(-2,-3,-4)]  %>% head(10)
+dim(aedat)
+```
+
+Pharmacology data:
+
+* 180 observations or 180 people
+
+* Now let's create the variable Quartile to indicate the quartile for the variable CAVGSS only when PBO is  Treatment [TRT]
+
+```{r, echo=FALSE}
+aedat <- aedat %>% 
+  group_by(PBO) %>%
+  mutate(Quartile = ifelse(PBO == "PBO", "PBO",
+                           paste0("Q", ntile(CAVGSS, n = 4)))) %>% 
+  ungroup()
+aedat[,c(-2,-3,-4)]  %>% head(10)
+```
+
+As an option to analize, we could normalize some variables. For example the BWT:
+
+* Let's create a normalized variable BWT_norm of the Body weight BWT (using the median)
+
+```{r}
+# Median(BWT):
+ref_bwt <- median(aedat$BWT)
+ref_bwt
+```
+
+Using the median in order to calculate BWT_norm
+```{r, echo=FALSE}
+dat_mod <- aedat %>% mutate(
+  BWT_norm = BWT - ref_bwt,
+  PTTYPE = factor(PTTYPE, levels = c("PT1", "PT2", "HV"))
+)
+dat_mod[,c(-2,-3,-4, -8)] %>% head(10)
+```
+
+# Data of interest:
+
+Let's return to the previous data with original BWT:
+
+```{r, echo=FALSE}
+aedat %>% 
+  mutate(across(where(is.numeric), pmtables::sig)) %>% 
+  select(STUDYID, USUBJID, PBO, CAVGSS, AE01, AETOXGR) %>% 
+  head(n=10)
+```
+We can find the reference for pmtables here: https://metrumresearchgroup.github.io/pmt-book/stable.html
+
+* `STUDYID`: Study Protocol [PROTA and PROTB]
+* `USUBJID`: Unique subject id
+* `AE01`: [1 or 0] Adverse event of grade 3 or higher
+
+# Visualizing relationships
+
+Objective:
+
+> Plot the probability of a grade 3 or higher AE vs predictor 
+
+Types of plots will depend on the predictor variable:
+
+  * Categorical variable
+  * Continuous variable
+
+# Relationship with categorical variable
+
+* x-axis: Categorical variable [`STUDYID`]
+* y-axis: Probability of AE [`AE01`]
+* geom: `point`
+
+# Probability vs categorical variable - Simple method: a point
+
+Using the predictor `STUDYID`:
+```{r}
+freq_table <- table(aedat[,c('STUDYID','AE01')])
+freq_table
+row_sums <- rowSums(freq_table)
+freq_table / row_sums
+```
+We can conclude that the last column give us the probability for event grade 3 or higher
+
+# Probability vs categorical variable {.sourceCode.r.small}
+::: columns
+
+:::: column
+```{r, 'cat-plot', fig.show='hide'}
+aedat %>% 
+  group_by(STUDYID) %>% 
+  summarise(x = sum(AE01), n=n()) %>% 
+  mutate(phat = x / n,
+         lcl = binom.confint(x,n,methods = "wilson")$lower,
+         ucl = binom.confint(x,n,methods = "wilson")$upper) %>% 
+  ggplot(aes(x=STUDYID, y=phat)) + 
+  geom_point() +
+  geom_errorbar(aes(ymin=lcl, ymax=ucl), 
+                width = 0.2) +
+  ylim(0,1) +
+  labs(x='Study', y='Probability of severe AE')
+```
+
+Note: `binom.confint` is in the `binom` package
+
+::::
+
+:::: column
+```{r, ref.label='cat-plot', echo=FALSE, out.width="95%"}
+
+```
+::::
+
+:::
+
+
+# Probability vs a continuous variable - Simple plots: 
+x = CAVGSS
+
+```{r}
+plot(aedat$CAVGSS,aedat$AE01, xlab = "CAVGSS", ylab = "Event AE01 = 0 or 1")
+
+data <- list(
+  AE01_0 = aedat$CAVGSS[aedat$AE01 == 0],
+  AE01_1 = aedat$CAVGSS[aedat$AE01 == 1])
+
+# Create a horizontal boxplot
+boxplot(data, horizontal = TRUE, main = "Horizontal Boxplot Example",
+        xlab = "CAVGSS", ylab = "Event AE01 = 0 or 1")
+```
+
+
+# Probability vs a continuous variable {.sourceCode.r.small}
+
+We are going to show the curves to estimate the proportions by CAVGSS and we also divide the data into Quartiles in order to give the proportion of AE01 = 1 in every case (Quartile).  
+
+:::{.columns}
+
+::::{.column}
+```{r}
+dat_eda <- aedat %>% group_by(Quartile) %>% mutate(MedConc = median(CAVGSS))
+```
+
+```{r, 'cont-er', fig.show='hide'}
+ggplot() +
+  # Add tick marks at top and bottom
+  geom_rug(data = filter(dat_eda, AE01 == 0),
+           aes(x = CAVGSS), sides = "b") +
+  geom_rug(data = filter(dat_eda, AE01 == 1),
+           aes(x = CAVGSS), sides = "t") +
+  # Add smooth mean function.   Note: Use of gam with 
+  #  binomial family to keep predictions on (0,1) scale
+  geom_smooth(data = dat_eda,
+              aes(x = CAVGSS, y = AE01),
+              method='gam', formula=y~s(x),
+              method.args = list(family='binomial')) +
+  # Add points and CIs
+  stat_summary(
+    data = dat_eda,
+    aes(x = MedConc, y = AE01), #, group = MedConc),
+    fun = function(y) sum(y) / length(y),
+    geom = "point"
+  ) +
+  stat_summary(
+    data = dat_eda,
+    aes(x = MedConc, y = AE01),   
+    # Wilson CI recommended by Agresti and Coull (2000) review paper
+    fun.min = function(y) {
+      binom.confint(sum(y),length(y),
+                    methods = "wilson")$lower
+      },
+    fun.max = function(y) {
+      binom.confint(sum(y), length(y),
+                    methods = "wilson")$upper
+      },
+    geom = "errorbar"
+  ) +
+  labs(x='Steady-state Cavg', y='Probability of severe AE')
+```
+::::
+
+::::{.column}
+```{r, ref.label='cont-er', echo=FALSE}
+
+```
+
+::::
+
+:::
+
+
+# Plotting tips
+
+* Break exposure into quartiles, compare incidence rate across quartiles
+  * Textbook variance formula $\frac{p(1-p)}{n}$ isn't the best choice with small sample sizes and probabilities near zero or one
+  * Recommendation: Use Wilson interval (implemented in  `binom.confint`)
+* Rug plots (`geom_rug`)
+* Stratify by other covariates of interest
+
+
+# Workbook 02: Visualizing binary data
